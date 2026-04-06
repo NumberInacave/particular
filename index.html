@@ -1,0 +1,587 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <title>particular</title>
+  <style>
+    body {
+      margin: 0;
+      background: #111;
+      overflow: hidden;
+      font-family: monospace;
+    }
+
+    canvas {
+      display: block;
+      cursor: cell;
+    }
+  </style>
+</head>
+
+<body>
+  <canvas id="v"></canvas>
+
+  <script>
+    const canvas = document.getElementById('v');
+    const ctx = canvas.getContext('2d');
+    const lerp = (a, b, t) => a + (b - a) * t;
+
+    const WORLD_SIZE = 10000, HALF_SIZE = WORLD_SIZE / 2;
+
+    let isPaused = false, showGrid = true, isGrabbing = false;
+    let timeScale = 1.0;
+
+    let mouse = { x: 0, y: 0 }, keys = {};
+    let mouseState = { 0: false, 1: false, 2: false };
+    let view = { x: 0, y: 0, zoom: 0.1, vx: 0, vy: 0 };
+    let targetView = { x: 0, y: 0, zoom: 0.1 };
+    let boxStart = null, boxOffset = { x: 0, y: 0 };
+
+    let particles = [];
+    let selectedParticles = [];
+    let grabOffset = [];
+    let originalPositions = [];
+    let undoStack = [];
+    let redoStack = [];
+    let clipboard = [];
+
+    const forces = {
+      proton: {
+        color: '#ff4d4d', size: 16, mass: 1.0,
+        r1: 50, r2: 300,
+        f1: { proton: -4.0, neutron: 5.0, electron: -2.0 },
+        f2: { proton: -1.0, neutron: 1.0, electron: 3.0 }
+      },
+      neutron: {
+        color: '#888888', size: 16, mass: 1.1,
+        r1: 50, r2: 200,
+        f1: { proton: 0.5, neutron: -0.5, electron: -2.0 },
+        f2: { proton: 3.0, neutron: 0.0, electron: 0.0 }
+      },
+      electron: {
+        color: '#4da6ff', size: 8, mass: 0.1,
+        r1: 100, r2: 600,
+        f1: { proton: -2.0, neutron: -2.0, electron: -3.0 },
+        f2: { proton: 3.0, neutron: 4.0, electron: -0.5 }
+      }
+    };
+    
+    function spawn(type, x, y) {
+      const newP = {
+        x: x ?? (Math.random() - 0.5) * WORLD_SIZE,
+        y: y ?? (Math.random() - 0.5) * WORLD_SIZE,
+        vx: 0,
+        vy: 0,
+        type: type,
+        stats: forces[type]
+      };
+
+      particles.push(newP);
+      if (typeof recordAction === 'function') {
+        recordAction('spawn', [newP]);
+      }
+    }
+
+    function resetSim() {
+      particles = [];
+      for (let i = 0; i < 150; i++) spawn('proton');
+      for (let i = 0; i < 150; i++) spawn('neutron');
+      for (let i = 0; i < 250; i++) spawn('electron');
+      timeScale = 0.25;
+      isPaused = false;
+    }
+
+    function resetZoom() {
+      const scale = Math.min(window.innerWidth, window.innerHeight) / WORLD_SIZE * 0.95;
+
+      targetView.zoom = scale;
+      targetView.x = window.innerWidth / 2;
+      targetView.y = window.innerHeight / 2;
+
+      if (view.zoom === 0.1) {
+        view.zoom = targetView.zoom;
+        view.x = targetView.x;
+        view.y = targetView.y;
+      }
+    }
+
+    function startGrab() {
+      if (selectedParticles.length === 0) return;
+
+      const mx = (mouse.x - view.x) / view.zoom;
+      const my = (mouse.y - view.y) / view.zoom;
+
+      originalPositions = selectedParticles.map(p => ({ x: p.x, y: p.y }));
+
+      recordAction('move', selectedParticles);
+
+      isGrabbing = true;
+      grabOffset = selectedParticles.map(p => ({
+        dx: p.x - mx,
+        dy: p.y - my
+      }));
+    }
+
+    function cancelGrab() {
+      if (!isGrabbing) return;
+
+      selectedParticles.forEach((p, i) => {
+        p.x = originalPositions[i].x;
+        p.y = originalPositions[i].y;
+        p.vx = 0;
+        p.vy = 0;
+      });
+
+      isGrabbing = false;
+      if (undoStack.length > 0) undoStack.pop();
+    }
+
+    function recordAction(type, targetParticles) {
+      const action = {
+        type: type,
+        data: targetParticles.map(p => ({
+          ref: p,
+          x: p.x,
+          y: p.y,
+          vx: p.vx,
+          vy: p.vy,
+          type: p.type
+        }))
+      };
+      undoStack.push(action);
+      redoStack = [];
+      if (undoStack.length > 50) undoStack.shift();
+    }
+
+    function undo() {
+      if (undoStack.length === 0) return;
+      const action = undoStack.pop();
+
+      const currentState = action.data.map(d => ({ ...d, x: d.ref.x, y: d.ref.y }));
+      redoStack.push({ type: action.type, data: currentState });
+
+      action.data.forEach(saved => {
+        if (action.type === 'move') {
+          saved.ref.x = saved.x;
+          saved.ref.y = saved.y;
+          saved.ref.vx = 0;
+          saved.ref.vy = 0;
+        } else if (action.type === 'delete') {
+          particles.push(saved.ref);
+        } else if (action.type === 'spawn') {
+          particles = particles.filter(p => p !== saved.ref);
+        }
+      });
+    }
+
+    function redo() {
+      if (redoStack.length === 0) return;
+      const state = redoStack.pop();
+      history.push(state);
+      particles = JSON.parse(state);
+    }
+
+    function applyPhysics() {
+      if (isPaused) return;
+      const dt = timeScale;
+
+      const mx = (mouse.x - view.x) / view.zoom;
+      const my = (mouse.y - view.y) / view.zoom;
+
+      for (let p1 of particles) {
+        let fx = 0, fy = 0;
+
+        const mRadius = 1000;
+        const isPull = keys['Digit4'];
+        const isPush = keys['Digit5'];
+
+        if (isPull || isPush) {
+          let mdx = mx - p1.x;
+          let mdy = my - p1.y;
+
+          if (mdx > HALF_SIZE) mdx -= WORLD_SIZE;
+          if (mdx < -HALF_SIZE) mdx += WORLD_SIZE;
+          if (mdy > HALF_SIZE) mdy -= WORLD_SIZE;
+          if (mdy < -HALF_SIZE) mdy += WORLD_SIZE;
+
+          const md2 = mdx * mdx + mdy * mdy;
+
+          if (md2 < mRadius * mRadius) {
+            const md = Math.sqrt(md2);
+            const dir = isPush ? -1 : 1;
+            const mForce = 15.0 * dir * (1 + md / mRadius);
+
+            fx += (mdx / md) * mForce;
+            fy += (mdy / md) * mForce;
+          }
+        }
+
+        for (let p2 of particles) {
+          if (p1 === p2) continue;
+
+          let dx = p2.x - p1.x;
+          let dy = p2.y - p1.y;
+
+          if (dx > HALF_SIZE) dx -= WORLD_SIZE;
+          if (dx < -HALF_SIZE) dx += WORLD_SIZE;
+          if (dy > HALF_SIZE) dy -= WORLD_SIZE;
+          if (dy < -HALF_SIZE) dy += WORLD_SIZE;
+
+          const d2 = dx * dx + dy * dy;
+          const r1 = p1.stats.r1;
+          const r2 = p1.stats.r2;
+
+          if (d2 > 0 && d2 < r2 * r2) {
+            const d = Math.sqrt(d2);
+            let forceMag = 0;
+
+            if (d < r1) {
+              forceMag = p1.stats.f1[p2.type] || 0;
+            } else {
+              const strength = p1.stats.f2[p2.type] || 0;
+              forceMag = strength * (1 - (d - r1) / (r2 - r1));
+            }
+
+            fx += (dx / d) * forceMag;
+            fy += (dy / d) * forceMag;
+          }
+        }
+
+        const damping = Math.pow(0.8, dt);
+
+        p1.vx = (p1.vx + fx * dt) * damping;
+        p1.vy = (p1.vy + fy * dt) * damping;
+
+        p1.x += p1.vx * dt;
+        p1.y += p1.vy * dt;
+
+        if (p1.x > HALF_SIZE) p1.x -= WORLD_SIZE;
+        if (p1.x < -HALF_SIZE) p1.x += WORLD_SIZE;
+        if (p1.y > HALF_SIZE) p1.y -= WORLD_SIZE;
+        if (p1.y < -HALF_SIZE) p1.y += WORLD_SIZE;
+      }
+    }
+
+    function drawGrid() {
+      if (!showGrid) return;
+      ctx.strokeStyle = "rgba(255, 255, 255," + String(0.05 * view.zoom + 0.1) + ")";
+      ctx.lineWidth = 1 / view.zoom;
+      const step = 100;
+      ctx.beginPath();
+      for (let i = -HALF_SIZE; i <= HALF_SIZE; i += step) {
+        ctx.moveTo(i, -HALF_SIZE); ctx.lineTo(i, HALF_SIZE);
+        ctx.moveTo(-HALF_SIZE, i); ctx.lineTo(HALF_SIZE, i);
+      }
+      ctx.stroke();
+    }
+
+    function updateView() {
+      const dt = timeScale;
+      const moveSpeed = view.zoom + 5;
+
+      const isMod = keys['ControlLeft'] || keys['ControlRight'] ||
+        keys['MetaLeft'] || keys['MetaRight'];
+
+      if (!isMod) {
+        if (keys['KeyW']) view.vy += moveSpeed * dt;
+        if (keys['KeyS']) view.vy -= moveSpeed * dt;
+        if (keys['KeyA']) view.vx += moveSpeed * dt;
+        if (keys['KeyD']) view.vx -= moveSpeed * dt;
+      }
+
+      view.vx *= Math.pow(0.5, dt);
+      view.vy *= Math.pow(0.5, dt);
+      targetView.x += view.vx;
+      targetView.y += view.vy;
+
+      const lerpSpeed = 0.2;
+      view.x = lerp(view.x, targetView.x, lerpSpeed);
+      view.y = lerp(view.y, targetView.y, lerpSpeed);
+      view.zoom = lerp(view.zoom, targetView.zoom, lerpSpeed);
+    }
+
+    function draw() {
+      updateView();
+
+      const mx = (mouse.x - view.x) / view.zoom;
+      const my = (mouse.y - view.y) / view.zoom;
+      const isOverBoard = Math.abs(mx) <= HALF_SIZE && Math.abs(my) <= HALF_SIZE;
+
+      if (isGrabbing && selectedParticles.length > 0) {
+        selectedParticles.forEach((p, i) => {
+          p.x = mx + grabOffset[i].dx;
+          p.y = my + grabOffset[i].dy;
+          p.vx = 0;
+          p.vy = 0;
+        });
+      }
+
+      if (boxStart) {
+        canvas.style.cursor = 'cell';
+      } else if (isGrabbing || mouseState[1] || (keys['Space'] && !boxStart)) {
+        canvas.style.cursor = 'grabbing';
+      } else {
+        canvas.style.cursor = 'grab';
+      }
+
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.fillStyle = '#111';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      ctx.translate(view.x, view.y);
+      ctx.scale(view.zoom, view.zoom);
+
+      ctx.fillStyle = '#000';
+      ctx.fillRect(-HALF_SIZE, -HALF_SIZE, WORLD_SIZE, WORLD_SIZE);
+
+      drawGrid();
+
+      if (boxStart && mouseState[0]) {
+        const mx = (mouse.x - view.x) / view.zoom;
+        const my = (mouse.y - view.y) / view.zoom;
+        ctx.strokeStyle = "rgba(255, 255, 255, 0.5)";
+        ctx.lineWidth = 1 / view.zoom;
+        ctx.strokeRect(boxStart.x + boxOffset.x, boxStart.y + boxOffset.y, mx - (boxStart.x + boxOffset.x), my - (boxStart.y + boxOffset.y));
+      }
+
+      particles.forEach(p => {
+        ctx.fillStyle = p.stats.color;
+        if (selectedParticles.includes(p)) {
+          ctx.strokeStyle = 'white';
+          ctx.lineWidth = 1 / view.zoom;
+          const s = p.stats.size;
+          ctx.strokeRect(p.x - s / 2, p.y - s / 2, s, s);
+        }
+        const s = p.stats.size;
+        ctx.fillRect(p.x - s / 2, p.y - s / 2, s, s);
+      });
+
+      applyPhysics();
+      requestAnimationFrame(draw);
+    }
+
+    function toggleFullscreen() {
+      if (!document.fullscreenElement) {
+        document.documentElement.requestFullscreen().catch(err => {
+          console.error(`Error attempting to enable full-screen mode: ${err.message}`);
+        });
+      } else {
+        document.exitFullscreen();
+      }
+    }
+
+    window.addEventListener('keydown', e => {
+      keys[e.code] = true;
+
+      const code = e.code;
+      const worldPos = { x: (mouse.x - view.x) / view.zoom, y: (mouse.y - view.y) / view.zoom };
+      const isMod = e.ctrlKey || e.metaKey;
+      const isShift = e.shiftKey;
+
+      if ((isMod && code === 'KeyA') && !isGrabbing) {
+        e.preventDefault();
+        selectedParticles = [...particles];
+      }
+
+      if (code === 'Digit1') spawn('proton', worldPos.x, worldPos.y);
+      if (code === 'Digit2') spawn('neutron', worldPos.x, worldPos.y);
+      if (code === 'Digit3') spawn('electron', worldPos.x, worldPos.y);
+      if (code === 'Comma') particles = [];
+      if (code === 'Period' || code === 'KeyT') resetSim();
+      if (e.key === '-') resetZoom();
+
+      if (code === 'KeyQ') showGrid = !showGrid;
+      if (code === 'KeyP' || code === 'KeyE') isPaused = !isPaused;
+      if (code === 'KeyO' || code === 'KeyF') {
+        toggleFullscreen();
+      }
+
+      if (code === 'ArrowLeft') timeScale = 0.1;
+      if (code === 'ArrowDown') timeScale = 0.25;
+      if (code === 'ArrowRight') timeScale = 0.5;
+      if (code === 'ArrowUp') timeScale = 1.0;
+
+      if (code === 'KeyX') {
+        recordAction('delete', selectedParticles);
+        particles = particles.filter(p => !selectedParticles.includes(p));
+        selectedParticles = [];
+      }
+
+      if (code === 'Enter' && isGrabbing) isGrabbing = false;
+      if (code === 'Escape' && isGrabbing) { preventDefault(); cancelGrab(); }
+      if (code === 'KeyG') {
+        if (!isGrabbing && selectedParticles.length > 0) {
+          startGrab();
+        } else if (isGrabbing) {
+          isGrabbing = false;
+        }
+      }
+
+      if (isMod && !isShift && e.key === 'z') {
+        e.preventDefault();
+        undo();
+      }
+
+      if (isMod && (isShift && (e.key === 'z'))) {
+        e.preventDefault();
+        redo();
+      }
+
+      if (isMod && code === 'KeyC') {
+        if (selectedParticles.length > 0) {
+          e.preventDefault();
+          clipboard = selectedParticles.map(p => ({
+            type: p.type,
+            dx: p.x - (mouse.x - view.x) / view.zoom,
+            dy: p.y - (mouse.y - view.y) / view.zoom
+          }));
+        }
+      }
+
+      if (isMod && code === 'KeyV') {
+        if (clipboard.length > 0) {
+          e.preventDefault();
+          const mx = (mouse.x - view.x) / view.zoom;
+          const my = (mouse.y - view.y) / view.zoom;
+
+          const newBatch = clipboard.map(item => {
+            const p = {
+              x: mx + item.dx,
+              y: my + item.dy,
+              vx: 0, vy: 0,
+              type: item.type,
+              stats: forces[item.type]
+            };
+            particles.push(p);
+            return p;
+          });
+          selectedParticles = newBatch;
+        }
+      }
+    });
+    window.addEventListener('keyup', e => {
+      keys[e.code] = false;
+
+      if (e.code === 'MetaLeft' || e.code === 'MetaRight' ||
+        e.code === 'ControlLeft' || e.code === 'ControlRight') {
+        keys['KeyW'] = false;
+        keys['KeyA'] = false;
+        keys['KeyS'] = false;
+        keys['KeyD'] = false;
+      }
+    });
+
+    window.addEventListener('mousemove', e => {
+      const dx = e.clientX - mouse.x;
+      const dy = e.clientY - mouse.y;
+
+      if (boxStart && keys['Space']) {
+        boxOffset.x += dx / view.zoom;
+        boxOffset.y += dy / view.zoom;
+      } else if ((mouseState[0] || mouseState[1] || keys['Space']) && !boxStart) {
+        targetView.x += dx; targetView.y += dy;
+        view.x += dx; view.y += dy;
+      }
+
+      mouse.x = e.clientX;
+      mouse.y = e.clientY;
+    });
+
+    ['mousedown', 'mouseup'].forEach(type => {
+      window.addEventListener(type, (e) => {
+        const isDown = (type === 'mousedown');
+        if (e.button in mouseState) mouseState[e.button] = isDown;
+
+        const mx = (mouse.x - view.x) / view.zoom;
+        const my = (mouse.y - view.y) / view.zoom;
+
+        if (isDown && e.button === 2) {
+          if (isGrabbing) {
+            cancelGrab();
+          } else {
+            selectedParticles = [];
+          }
+          return;
+        }
+
+        if (e.button === 0) {
+          if (isDown) {
+            if (isGrabbing) {
+              recordAction('move', selectedParticles);
+              isGrabbing = false;
+            } else {
+              boxStart = { x: mx, y: my };
+              boxOffset = { x: 0, y: 0 };
+            }
+          } else if (boxStart) {
+            const finalStart = { x: boxStart.x + boxOffset.x, y: boxStart.y + boxOffset.y };
+            const minX = Math.min(finalStart.x, mx), maxX = Math.max(finalStart.x, mx);
+            const minY = Math.min(finalStart.y, my), maxY = Math.max(finalStart.y, my);
+
+            const isClick = Math.hypot(mx - finalStart.x, my - finalStart.y) < 5;
+            if (isClick && !e.shiftKey) {
+              selectedParticles = [];
+            } else if (!isClick) {
+              const boxed = particles.filter(p => p.x >= minX && p.x <= maxX && p.y >= minY && p.y <= maxY);
+              if (e.shiftKey) {
+                boxed.forEach(p => { if (!selectedParticles.includes(p)) selectedParticles.push(p); });
+              } else {
+                selectedParticles = boxed;
+              }
+            }
+            boxStart = null;
+          }
+        }
+      });
+    });
+
+    window.addEventListener('wheel', e => {
+      e.preventDefault();
+
+      if (e.ctrlKey || e.altKey || e.metaKey) {
+        const sensitivity = 1.0;
+        targetView.x -= e.deltaX * sensitivity;
+        targetView.y -= e.deltaY * sensitivity;
+
+        view.x = targetView.x;
+        view.y = targetView.y;
+      } else {
+        const zoomFactor = Math.pow(1.1, -e.deltaY / 100);
+        const oldZoom = view.zoom;
+        const newZoom = Math.min(Math.max(oldZoom * zoomFactor, 0.01), 20);
+
+        const dx = (mouse.x - view.x) * (newZoom / oldZoom - 1);
+        const dy = (mouse.y - view.y) * (newZoom / oldZoom - 1);
+
+        targetView.x -= dx;
+        targetView.y -= dy;
+        targetView.zoom = newZoom;
+
+        view.x = targetView.x;
+        view.y = targetView.y;
+        view.zoom = targetView.zoom;
+      }
+    }, { passive: false });
+
+    window.addEventListener('blur', () => { for (let key in keys) { keys[key] = false; } });
+    document.addEventListener('contextmenu', event => event.preventDefault());
+    window.addEventListener('resize', () => {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+
+      resetZoom();
+    });
+
+    function init() {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+      resetSim();
+      resetZoom();
+    }
+
+    init();
+    draw();
+  </script>
+</body>
+
+</html>
