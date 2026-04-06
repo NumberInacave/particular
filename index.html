@@ -29,7 +29,7 @@
     const WORLD_SIZE = 10000, HALF_SIZE = WORLD_SIZE / 2;
 
     let isPaused = false, showGrid = true, isGrabbing = false;
-    let timeScale = 1.0;
+    let timeScale = 0.25;
 
     let mouse = { x: 0, y: 0 }, keys = {};
     let mouseState = { 0: false, 1: false, 2: false };
@@ -60,12 +60,12 @@
       },
       electron: {
         color: '#4da6ff', size: 8, mass: 0.1,
-        r1: 100, r2: 600,
+        r1: 100, r2: 800,
         f1: { proton: -2.0, neutron: -2.0, electron: -3.0 },
         f2: { proton: 3.0, neutron: 4.0, electron: -0.5 }
       }
     };
-    
+
     function spawn(type, x, y) {
       const newP = {
         x: x ?? (Math.random() - 0.5) * WORLD_SIZE,
@@ -278,6 +278,11 @@
     function updateView() {
       const dt = timeScale;
       const moveSpeed = view.zoom + 5;
+      const lerpSpeed = 0.3;
+
+      view.x = lerp(view.x, targetView.x, lerpSpeed);
+      view.y = lerp(view.y, targetView.y, lerpSpeed);
+      view.zoom = lerp(view.zoom, targetView.zoom, lerpSpeed);
 
       const isMod = keys['ControlLeft'] || keys['ControlRight'] ||
         keys['MetaLeft'] || keys['MetaRight'];
@@ -293,11 +298,6 @@
       view.vy *= Math.pow(0.5, dt);
       targetView.x += view.vx;
       targetView.y += view.vy;
-
-      const lerpSpeed = 0.2;
-      view.x = lerp(view.x, targetView.x, lerpSpeed);
-      view.y = lerp(view.y, targetView.y, lerpSpeed);
-      view.zoom = lerp(view.zoom, targetView.zoom, lerpSpeed);
     }
 
     function draw() {
@@ -547,19 +547,15 @@
         view.y = targetView.y;
       } else {
         const zoomFactor = Math.pow(1.1, -e.deltaY / 100);
-        const oldZoom = view.zoom;
-        const newZoom = Math.min(Math.max(oldZoom * zoomFactor, 0.01), 20);
+        const oldTargetZoom = targetView.zoom;
+        const newTargetZoom = Math.min(Math.max(oldTargetZoom * zoomFactor, 0.025), 20);
 
-        const dx = (mouse.x - view.x) * (newZoom / oldZoom - 1);
-        const dy = (mouse.y - view.y) * (newZoom / oldZoom - 1);
+        const dx = (mouse.x - targetView.x) * (newTargetZoom / oldTargetZoom - 1);
+        const dy = (mouse.y - targetView.y) * (newTargetZoom / oldTargetZoom - 1);
 
         targetView.x -= dx;
         targetView.y -= dy;
-        targetView.zoom = newZoom;
-
-        view.x = targetView.x;
-        view.y = targetView.y;
-        view.zoom = targetView.zoom;
+        targetView.zoom = newTargetZoom;
       }
     }, { passive: false });
 
