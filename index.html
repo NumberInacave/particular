@@ -60,9 +60,9 @@
       },
       electron: {
         color: '#4da6ff', size: 8, mass: 0.1,
-        r1: 100, r2: 800,
+        r1: 100, r2: 600,
         f1: { proton: -2.0, neutron: -2.0, electron: -3.0 },
-        f2: { proton: 3.0, neutron: 4.0, electron: -0.5 }
+        f2: { proton: 3.0, neutron: 3.0, electron: -0.5 }
       }
     };
 
@@ -167,7 +167,11 @@
           saved.ref.vx = 0;
           saved.ref.vy = 0;
         } else if (action.type === 'delete') {
-          particles.push(saved.ref);
+          action.data.forEach(saved => {
+            if (!particles.includes(saved.ref)) {
+              particles.push(saved.ref);
+            }
+          });
         } else if (action.type === 'spawn') {
           particles = particles.filter(p => p !== saved.ref);
         }
@@ -386,7 +390,7 @@
       if (code === 'Digit1') spawn('proton', worldPos.x, worldPos.y);
       if (code === 'Digit2') spawn('neutron', worldPos.x, worldPos.y);
       if (code === 'Digit3') spawn('electron', worldPos.x, worldPos.y);
-      if (code === 'Comma') particles = [];
+      if (code === 'Comma') { recordAction('delete', [...particles]); particles = []; selectedParticles = []; }
       if (code === 'Period' || code === 'KeyT') resetSim();
       if (e.key === '-') resetZoom();
 
