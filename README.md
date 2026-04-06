@@ -6,6 +6,7 @@ wasd, middle mouse button, cmd/ctrl/alt + trackpad scrolling, space + mousemove 
 mouse wheel, trackpad scrolling - zoom camera<br>
 
 drag left mouse button - box select<br>
+drag left mouse button + shift - box select with previous selection<br>
 dragging left mouse button + space - move selection origin (top left)<br>
 click left mouse button - deselect all<br>
 
@@ -33,6 +34,7 @@ down arrow - 0.25<br>
 right arrow - 0.5<br>
 up arrow - 1.0 <br>
 
+cmd/ctrl + a - select all<br>
 cmd/ctrl + c - copy selection<br>
 cmd/ctrl + v - paste selection<br>
 cmd/ctrl + z - undo<br>
