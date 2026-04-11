@@ -26,8 +26,8 @@
     const ctx = canvas.getContext('2d');
     const lerp = (a, b, t) => a + (b - a) * t;
 
-    const WORLD_SIZE = 10000, HALF_SIZE = WORLD_SIZE / 2;
-
+    const worldSize = 10000, halfSize = worldSize / 2;
+    const spriteCache = {};
     let isPaused = false, showGrid = true, isGrabbing = false;
     let timeScale = 0.25;
 
@@ -68,8 +68,8 @@
 
     function spawn(type, x, y) {
       const newP = {
-        x: x ?? (Math.random() - 0.5) * WORLD_SIZE,
-        y: y ?? (Math.random() - 0.5) * WORLD_SIZE,
+        x: x ?? (Math.random() - 0.5) * worldSize,
+        y: y ?? (Math.random() - 0.5) * worldSize,
         vx: 0,
         vy: 0,
         type: type,
@@ -92,7 +92,7 @@
     }
 
     function resetZoom() {
-      const scale = Math.min(window.innerWidth, window.innerHeight) / WORLD_SIZE * 0.95;
+      const scale = Math.min(window.innerWidth, window.innerHeight) / worldSize * 0.95;
 
       targetView.zoom = scale;
       targetView.x = window.innerWidth / 2;
@@ -185,84 +185,96 @@
       particles = JSON.parse(state);
     }
 
+    function preRenderSprites() {
+      Object.keys(forces).forEach(type => {
+        const stats = forces[type];
+        const s = stats.size;
+
+        const offCanvas = document.createElement('canvas');
+        offCanvas.width = s;
+        offCanvas.height = s;
+        const offCtx = offCanvas.getContext('2d');
+
+        offCtx.fillStyle = stats.color;
+        offCtx.fillRect(0, 0, s, s);
+
+        spriteCache[type] = offCanvas;
+      });
+    }
+
     function applyPhysics() {
       if (isPaused) return;
       const dt = timeScale;
-
       const mx = (mouse.x - view.x) / view.zoom;
       const my = (mouse.y - view.y) / view.zoom;
+
+      const GRID_SIZE = 500;
+      const grid = new Map();
+
+      for (const p of particles) {
+        const gx = Math.floor((p.x + halfSize) / GRID_SIZE);
+        const gy = Math.floor((p.y + halfSize) / GRID_SIZE);
+        const key = `${gx},${gy}`;
+        if (!grid.has(key)) grid.set(key, []);
+        grid.get(key).push(p);
+      }
 
       for (let p1 of particles) {
         let fx = 0, fy = 0;
 
         const mRadius = 1000;
-        const isPull = keys['Digit4'];
-        const isPush = keys['Digit5'];
-
+        const isPull = keys['Digit4'], isPush = keys['Digit5'];
         if (isPull || isPush) {
-          let mdx = mx - p1.x;
-          let mdy = my - p1.y;
-
-          if (mdx > HALF_SIZE) mdx -= WORLD_SIZE;
-          if (mdx < -HALF_SIZE) mdx += WORLD_SIZE;
-          if (mdy > HALF_SIZE) mdy -= WORLD_SIZE;
-          if (mdy < -HALF_SIZE) mdy += WORLD_SIZE;
-
+          let mdx = mx - p1.x; let mdy = my - p1.y;
+          if (mdx > halfSize) mdx -= worldSize; if (mdx < -halfSize) mdx += worldSize;
+          if (mdy > halfSize) mdy -= worldSize; if (mdy < -halfSize) mdy += worldSize;
           const md2 = mdx * mdx + mdy * mdy;
-
           if (md2 < mRadius * mRadius) {
             const md = Math.sqrt(md2);
-            const dir = isPush ? -1 : 1;
-            const mForce = 15.0 * dir * (1 + md / mRadius);
-
-            fx += (mdx / md) * mForce;
-            fy += (mdy / md) * mForce;
+            const mForce = 15.0 * (isPush ? -1 : 1) * (1 + md / mRadius);
+            fx += (mdx / md) * mForce; fy += (mdy / md) * mForce;
           }
         }
 
-        for (let p2 of particles) {
-          if (p1 === p2) continue;
+        const gx = Math.floor((p1.x + halfSize) / GRID_SIZE);
+        const gy = Math.floor((p1.y + halfSize) / GRID_SIZE);
 
-          let dx = p2.x - p1.x;
-          let dy = p2.y - p1.y;
+        for (let x = gx - 1; x <= gx + 1; x++) {
+          for (let y = gy - 1; y <= gy + 1; y++) {
+            const wx = (x + Math.ceil(worldSize / GRID_SIZE)) % Math.ceil(worldSize / GRID_SIZE);
+            const wy = (y + Math.ceil(worldSize / GRID_SIZE)) % Math.ceil(worldSize / GRID_SIZE);
+            const neighbors = grid.get(`${wx},${wy}`);
 
-          if (dx > HALF_SIZE) dx -= WORLD_SIZE;
-          if (dx < -HALF_SIZE) dx += WORLD_SIZE;
-          if (dy > HALF_SIZE) dy -= WORLD_SIZE;
-          if (dy < -HALF_SIZE) dy += WORLD_SIZE;
+            if (!neighbors) continue;
 
-          const d2 = dx * dx + dy * dy;
-          const r1 = p1.stats.r1;
-          const r2 = p1.stats.r2;
+            for (let p2 of neighbors) {
+              if (p1 === p2) continue;
 
-          if (d2 > 0 && d2 < r2 * r2) {
-            const d = Math.sqrt(d2);
-            let forceMag = 0;
+              let dx = p2.x - p1.x; let dy = p2.y - p1.y;
+              if (dx > halfSize) dx -= worldSize; if (dx < -halfSize) dx += worldSize;
+              if (dy > halfSize) dy -= worldSize; if (dy < -halfSize) dy += worldSize;
 
-            if (d < r1) {
-              forceMag = p1.stats.f1[p2.type] || 0;
-            } else {
-              const strength = p1.stats.f2[p2.type] || 0;
-              forceMag = strength * (1 - (d - r1) / (r2 - r1));
+              const d2 = dx * dx + dy * dy;
+              if (d2 > 0 && d2 < p1.stats.r2 * p1.stats.r2) {
+                const d = Math.sqrt(d2);
+                let forceMag = (d < p1.stats.r1)
+                  ? (p1.stats.f1[p2.type] || 0)
+                  : (p1.stats.f2[p2.type] || 0) * (1 - (d - p1.stats.r1) / (p1.stats.r2 - p1.stats.r1));
+
+                fx += (dx / d) * forceMag;
+                fy += (dy / d) * forceMag;
+              }
             }
-
-            fx += (dx / d) * forceMag;
-            fy += (dy / d) * forceMag;
           }
         }
 
         const damping = Math.pow(0.8, dt);
-
         p1.vx = (p1.vx + fx * dt) * damping;
         p1.vy = (p1.vy + fy * dt) * damping;
+        p1.x += p1.vx * dt; p1.y += p1.vy * dt;
 
-        p1.x += p1.vx * dt;
-        p1.y += p1.vy * dt;
-
-        if (p1.x > HALF_SIZE) p1.x -= WORLD_SIZE;
-        if (p1.x < -HALF_SIZE) p1.x += WORLD_SIZE;
-        if (p1.y > HALF_SIZE) p1.y -= WORLD_SIZE;
-        if (p1.y < -HALF_SIZE) p1.y += WORLD_SIZE;
+        if (p1.x > halfSize) p1.x -= worldSize; if (p1.x < -halfSize) p1.x += worldSize;
+        if (p1.y > halfSize) p1.y -= worldSize; if (p1.y < -halfSize) p1.y += worldSize;
       }
     }
 
@@ -272,9 +284,9 @@
       ctx.lineWidth = 1 / view.zoom;
       const step = 100;
       ctx.beginPath();
-      for (let i = -HALF_SIZE; i <= HALF_SIZE; i += step) {
-        ctx.moveTo(i, -HALF_SIZE); ctx.lineTo(i, HALF_SIZE);
-        ctx.moveTo(-HALF_SIZE, i); ctx.lineTo(HALF_SIZE, i);
+      for (let i = -halfSize; i <= halfSize; i += step) {
+        ctx.moveTo(i, -halfSize); ctx.lineTo(i, halfSize);
+        ctx.moveTo(-halfSize, i); ctx.lineTo(halfSize, i);
       }
       ctx.stroke();
     }
@@ -309,7 +321,7 @@
 
       const mx = (mouse.x - view.x) / view.zoom;
       const my = (mouse.y - view.y) / view.zoom;
-      const isOverBoard = Math.abs(mx) <= HALF_SIZE && Math.abs(my) <= HALF_SIZE;
+      const isOverBoard = Math.abs(mx) <= halfSize && Math.abs(my) <= halfSize;
 
       if (isGrabbing && selectedParticles.length > 0) {
         selectedParticles.forEach((p, i) => {
@@ -336,7 +348,7 @@
       ctx.scale(view.zoom, view.zoom);
 
       ctx.fillStyle = '#000';
-      ctx.fillRect(-HALF_SIZE, -HALF_SIZE, WORLD_SIZE, WORLD_SIZE);
+      ctx.fillRect(-halfSize, -halfSize, worldSize, worldSize);
 
       drawGrid();
 
@@ -349,15 +361,15 @@
       }
 
       particles.forEach(p => {
-        ctx.fillStyle = p.stats.color;
+        const s = p.stats.size;
+
+        ctx.drawImage(spriteCache[p.type], p.x - s / 2, p.y - s / 2, s, s);
+
         if (selectedParticles.includes(p)) {
           ctx.strokeStyle = 'white';
           ctx.lineWidth = 1 / view.zoom;
-          const s = p.stats.size;
           ctx.strokeRect(p.x - s / 2, p.y - s / 2, s, s);
         }
-        const s = p.stats.size;
-        ctx.fillRect(p.x - s / 2, p.y - s / 2, s, s);
       });
 
       applyPhysics();
@@ -575,6 +587,7 @@
     function init() {
       canvas.width = window.innerWidth;
       canvas.height = window.innerHeight;
+      preRenderSprites();
       resetSim();
       resetZoom();
     }
