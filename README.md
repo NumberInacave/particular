@@ -3,7 +3,7 @@
 
 ### controls:
 wasd, middle mouse button, cmd/ctrl/alt + trackpad scrolling, space + mousemove - pan camera<br>
-mouse wheel, trackpad scrolling - zoom camera<br>
+mouse wheel, trackpad scrolling - zoom camera towards mouse<br>
 
 drag left mouse button - box select<br>
 drag left mouse button + shift - box select with previous selection<br>
